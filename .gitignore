@@ -1,0 +1,23 @@
+# 本地配置：含个人路径，不要提交
+config.json
+
+# 安装计划任务时生成，内含本机用户名与解释器路径
+autobackup_task.xml
+
+# 备份产物与运行状态
+auto/
+*.sol
+*.log
+watcher_state.json
+*_prerestore.sol
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

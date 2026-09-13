@@ -1,0 +1,22 @@
+{
+  "_comment": [
+    "把所有键删掉、或整个文件删掉都可以：程序会自动探测。",
+    "只有当自动探测失败（例如游戏装在非标准路径）时才需要手工填写。",
+    "路径中的反斜杠要写成两个，例如 C:\\\\Games\\\\NEO Scavenger",
+    "命令行可用 --config <文件> 指定本文件位置。"
+  ],
+
+  "save_dir": "C:\\Users\\<你的用户名>\\AppData\\Roaming\\Macromedia\\Flash Player\\#SharedObjects\\XXXXXXXX\\localhost\\Program Files (x86)\\Steam\\steamapps\\common\\NEO Scavenger\\NEOScavenger.exe",
+
+  "game_dir": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\NEO Scavenger",
+
+  "backup_root": "C:\\Users\\<你的用户名>\\Documents\\NEO Scavenger Save Guard\\auto",
+
+  "poll_sec": 10,
+
+  "refresh_g0": true,
+
+  "snap_on_game_start": true,
+
+  "launch_gui_on_game_start": true
+}
