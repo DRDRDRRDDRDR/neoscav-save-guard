@@ -1,0 +1,120 @@
+name: Release
+
+# Creates the GitHub Release for the version pinned in `env.VERSION` below.
+#
+# Why this exists: the maintainer's environment cannot reach GitHub over git/HTTPS,
+# so tag + release are produced here instead. Publishing a new version is therefore
+# a one-file change: bump VERSION and update the notes heredoc, then push this file.
+#
+# Idempotent: if the release for the resolved tag already exists, the job stops
+# after the guard step and changes nothing.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  VERSION: 1.1.0
+  ASSET_BASENAME: neoscav-save-guard
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag name
+        id: meta
+        run: echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Skip when the release already exists
+        id: guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.meta.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release ${{ steps.meta.outputs.tag }} already exists - nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build release asset
+        if: steps.guard.outputs.exists == 'false'
+        run: |
+          ZIP="${ASSET_BASENAME}-${{ steps.meta.outputs.tag }}.zip"
+          # pure-git exclusion so the shipped archive holds the toolkit only, not the CI config
+          # (avoids depending on the separate `zip` binary)
+          git archive --format=zip -o "$ZIP" HEAD -- . ':(exclude).github'
+          unzip -l "$ZIP"
+
+      - name: Create release
+        if: steps.guard.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > release-notes.md <<'NOTES'
+          ## English as the source language, Simplified Chinese as a translation table
+
+          This is a pure internationalization refactor. **There is no behavior change**: with
+          `lang=zh` the output is byte-identical to v1.0.0 (verified by a golden-master regression run).
+
+          ### What changed
+
+          - **English is now the source language.** All user-facing strings are written in English and
+            translated at runtime by the new `nsg_i18n.py` module.
+          - **New module `nsg_i18n.py`** containing `tr()` plus the Simplified Chinese table (`_ZH`).
+            When the active language is not `zh`, `tr()` is a pass-through returning the English msgid.
+          - **Language selection order:** `NSG_LANG` environment variable -> `config.json` `"lang"` ->
+            built-in default `en`.
+          - **GUI script renamed:** `存档回档器.pyw` -> `save_rollback_gui.pyw`. The old name is still
+            tolerated by the watcher and shipped as a compatibility shim, so existing scheduled tasks
+            and shortcuts keep working.
+          - **Docs:** `docs/USAGE.md` is now the primary (English) guide, `docs/USAGE.zh-CN.md` is kept
+            for Chinese users. `README.md` gained a `Language` / `界面语言` section.
+          - **Source cleanup:** all code comments, docstrings and `.gitignore` comments translated to English.
+
+          ### Deliberately NOT translated
+
+          These are functional identifiers, not user-facing text - translating them would break existing
+          installations:
+
+          - The scheduled task name `NEO Scavenger 存档自动备份`
+          - The Task XML `<Description>`
+          - `schtasks` output-matching keywords (`状态`, `上次运行`, `作为用户`, `要运行的任务`, `计划任务状态`)
+          - The legacy filename `存档回档器.pyw` (compatibility fallback)
+
+          ### Upgrade
+
+          Unzip over your existing installation, then set the language in `config.json`:
+
+          ```json
+          { "lang": "zh" }
+          ```
+
+          `zh` = Simplified Chinese, `en` = English. Omit the key to get English by default.
+
+          ### Verification performed before release
+
+          - AST-structural identity check between v1.0.0 and v1.1.0 after reverting `tr()` calls -
+            4-way equality (AST dump with normalized strings, ordered `tr()` argument list, ordered
+            non-docstring literal list, import set).
+          - Golden-master regression: `lang=zh` output byte-identical to the v1.0.0 baseline
+            (only the expected runtime PID differs).
+          - 217 unique English keys in the translation table, zero collisions.
+          - GUI self-test in `zh`, `en` and default modes; 163 existing snapshots left untouched.
+          NOTES
+          gh release create "${{ steps.meta.outputs.tag }}" \
+            --target "$GITHUB_SHA" \
+            --title "${{ steps.meta.outputs.tag }} - English as the source language, Simplified Chinese as a translation table" \
+            --notes-file release-notes.md \
+            "${ASSET_BASENAME}-${{ steps.meta.outputs.tag }}.zip"
