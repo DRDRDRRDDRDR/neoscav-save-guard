@@ -1,10 +1,11 @@
-# 本地配置：含个人路径，不要提交
+# Local config: contains personal paths, never commit it
 config.json
 
-# 安装计划任务时生成，内含本机用户名与解释器路径
+# Generated when registering the scheduled task; holds the local username
+# and interpreter path
 autobackup_task.xml
 
-# 备份产物与运行状态
+# Backup artefacts and runtime state
 auto/
 *.sol
 *.log
@@ -16,7 +17,7 @@ __pycache__/
 *.pyc
 *.pyo
 
-# 编辑器 / 系统
+# Editors / OS
 .vscode/
 .idea/
 Thumbs.db

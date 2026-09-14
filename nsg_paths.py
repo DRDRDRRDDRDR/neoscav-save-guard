@@ -1,35 +1,38 @@
 # -*- coding: utf-8 -*-
-r"""nsg_paths —— NEO Scavenger 路径解析（存档目录 / 游戏目录 / 备份目录）
+r"""nsg_paths — NEO Scavenger path resolution (save dir / game dir / backup dir).
 
-被 neo_save_watcher.py、autobackup_setup.py、save_rollback_gui.pyw 共用。
+Shared by neo_save_watcher.py, autobackup_setup.py and save_rollback_gui.pyw.
 
-解析优先级（由高到低）：
+Resolution priority (highest first):
 
-  1. 环境变量     NSG_SAVE_DIR / NSG_GAME_DIR / NSG_BACKUP_ROOT
-  2. 配置文件     config.json（与本模块同目录，或用 --config 指定）
-  3. 自动探测     见 detect_save_dir()
+  1. Environment  NSG_SAVE_DIR / NSG_GAME_DIR / NSG_BACKUP_ROOT
+  2. Config file  config.json (next to this module, or via --config)
+  3. Detection    see detect_save_dir()
 
-自动探测的原理
---------------
-Flash 把本地 SWF 的 SharedObject 放在：
+How detection works
+-------------------
+Flash stores local SWF SharedObjects under:
 
-    %APPDATA%\Macromedia\Flash Player\#SharedObjects\<随机串>\localhost\<exe 全路径>\
+    %APPDATA%\Macromedia\Flash Player\#SharedObjects\<random>\localhost\<full exe path>\
 
-其中 `<exe 全路径>` 是游戏主程序的路径去掉盘符与冒号（例如
-`Program Files (x86)\Steam\steamapps\common\NEO Scavenger\NEOScavenger.exe`）。
+where ``<full exe path>`` is the game executable's path with the drive letter and
+colon stripped, for example
+``Program Files (x86)\Steam\steamapps\common\NEO Scavenger\NEOScavenger.exe``.
 
-因此：
+Therefore:
 
-* 递归找到含 `nsSGv1.sol` 的目录 → 就是存档目录；
-* 由该路径**反推**游戏目录：去掉末段（exe），再逐个盘符试拼直到目录存在。
+* recursively find the directory containing ``nsSGv1.sol`` — that is the save dir;
+* **reverse-derive** the game dir from it: drop the last segment (the exe), then try
+  each drive letter until a directory exists.
 
-这样换机器 / 换 Steam 库 / 换用户名都不需要改代码。
+This way a different machine, Steam library or username needs no code changes.
 """
 
 import json
 import os
 import re
 import sys
+from nsg_i18n import tr
 
 SAVE_NAME = 'nsSGv1.sol'
 GAME_EXE = 'NEOScavenger.exe'
@@ -38,8 +41,8 @@ GAME_FOLDER = 'NEO Scavenger'
 CONFIG_NAME = 'config.json'
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-#: 解析过程中收集到的告警（例如 config.json 存在但格式错误）。
-#: 调用方可自行决定是否展示；--check 会打印出来。
+#: Warnings collected during resolution (e.g. config.json exists but is malformed).
+#: Callers decide whether to surface them; --check prints them.
 WARNINGS = []
 
 
@@ -47,12 +50,13 @@ def warn(msg):
     WARNINGS.append(msg)
 
 
-# ------------------------------------------------------------------ 配置
+# ------------------------------------------------------------------ config
 def cli_config_arg(argv=None):
-    r"""在 argparse 之前先扫一遍 --config <FILE> / --config=FILE。
+    r"""Scan for --config <FILE> / --config=FILE before argparse runs.
 
-    为什么需要：STATE_FILE / LOG_FILE 这类常量是模块级推导的，
-    那时 argparse 还没跑。各脚本在导入期调用本函数即可拿到配置文件路径。
+    Why this is needed: constants such as STATE_FILE / LOG_FILE are derived at
+    module level, which happens before argparse has run. Each script calls this
+    function at import time to learn the config file path.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
     for i, a in enumerate(argv):
@@ -64,7 +68,7 @@ def cli_config_arg(argv=None):
 
 
 def config_path(cli_arg=None):
-    """配置文件路径：显式指定 > 脚本同目录 > 用户目录。"""
+    """Config file path: explicit > next to the script > user home dir."""
     if cli_arg:
         return cli_arg
     local = os.path.join(HERE, CONFIG_NAME)
@@ -73,11 +77,11 @@ def config_path(cli_arg=None):
     alt = os.path.join(os.path.expanduser('~'), '.' + CONFIG_NAME.replace('.json', '') + '.json')
     if os.path.isfile(alt):
         return alt
-    return local          # 不存在也返回默认位置，便于报错时提示
+    return local          # return the default location even if absent, for error messages
 
 
 def load_config(cli_arg=None):
-    """读 config.json；不存在返回 {}。格式错误会记入 WARNINGS。"""
+    """Read config.json; return {} when absent. Malformed input goes to WARNINGS."""
     p = config_path(cli_arg)
     if not os.path.isfile(p):
         return {}
@@ -85,17 +89,17 @@ def load_config(cli_arg=None):
         with open(p, encoding='utf-8-sig') as f:
             data = json.load(f)
     except Exception as e:
-        warn('config.json 解析失败（将忽略）: %s -> %r' % (p, e))
+        warn(tr('Failed to parse config.json (ignoring it): %s -> %r') % (p, e))
         return {}
     if not isinstance(data, dict):
-        warn('config.json 顶层必须是对象（将忽略）: %s' % p)
+        warn(tr('config.json must contain an object at the top level (ignoring it): %s') % p)
         return {}
     return data
 
 
-# ------------------------------------------------------------------ 探测
+# ------------------------------------------------------------------ detection
 def _flash_roots():
-    r"""Flash SharedObject 的候选根目录（新旧两套命名都试）。"""
+    r"""Candidate Flash SharedObject roots (both the old and the new naming)."""
     appdata = os.environ.get('APPDATA') or os.path.join(
         os.path.expanduser('~'), 'AppData', 'Roaming')
     return [
@@ -105,10 +109,11 @@ def _flash_roots():
 
 
 def detect_save_dir():
-    r"""递归查找含 nsSGv1.sol 的目录。
+    r"""Recursively find the directory containing nsSGv1.sol.
 
-    有多个候选时优先选路径里含 "NEO Scavenger" 的（避免同名 .sol 误判）。
-    找不到返回 None。
+    When several candidates exist, prefer the one whose path contains
+    "NEO Scavenger" (avoids mistaking a same-named .sol for ours).
+    Returns None when nothing is found.
     """
     hits = []
     for root in _flash_roots():
@@ -124,7 +129,7 @@ def detect_save_dir():
 
 
 def _steam_roots():
-    """常见 Steam 安装根目录 + libraryfolders.vdf 里登记的额外库。"""
+    """Common Steam install roots plus extra libraries from libraryfolders.vdf."""
     roots = []
     for base in (r'C:\Program Files (x86)\Steam', r'C:\Program Files\Steam',
                  r'C:\Steam', r'D:\Steam', r'D:\SteamLibrary', r'E:\SteamLibrary'):
@@ -147,10 +152,11 @@ def _steam_roots():
 
 
 def detect_game_dir(save_dir=None):
-    r"""探测游戏目录。
+    r"""Detect the game directory.
 
-    先由存档目录反推（去掉末段再试各盘符），再退化为扫常见 Steam 库。
-    找不到返回 None。
+    First reverse-derive it from the save dir (drop the last segment, try each
+    drive letter), then fall back to scanning the common Steam libraries.
+    Returns None when nothing is found.
     """
     if save_dir:
         parts = [p for p in save_dir.replace('/', '\\').split('\\') if p]
@@ -162,7 +168,7 @@ def detect_game_dir(save_dir=None):
             cand = drive + ':\\' + '\\'.join(tail)
             if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, GAME_EXE)):
                 return cand
-        # 反推失败也无妨：末段可能就是游戏目录名
+        # Failing to reverse-derive is fine: the last segment may be the game dir name
         for drive in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
             cand = drive + ':\\' + '\\'.join(parts)
             if os.path.isdir(cand) and os.path.isfile(os.path.join(cand, GAME_EXE)):
@@ -175,22 +181,22 @@ def detect_game_dir(save_dir=None):
 
 
 def default_backup_root():
-    """默认备份目录：<用户文档>\\NEO Scavenger Save Guard\\auto"""
+    """Default backup dir: <user Documents>\\NEO Scavenger Save Guard\\auto"""
     docs = os.path.join(os.path.expanduser('~'), 'Documents')
     if not os.path.isdir(docs):
         docs = os.path.expanduser('~')
     return os.path.join(docs, 'NEO Scavenger Save Guard', 'auto')
 
 
-# ------------------------------------------------------------------ 汇总
+# ------------------------------------------------------------------ aggregate
 def resolve(cli_config=None):
-    r"""解析出最终路径。
+    r"""Resolve the final paths.
 
-    返回 dict：
-        save_dir / game_dir / backup_root      —— 已确认（可能为 None）
-        nsm_dir                                 —— 游戏目录下的 NSM（可能为 None）
-        source                                  —— 各项来源：config/env/detect/default
-        missing                                 —— 需要人工补的键名列表
+    Returns a dict:
+        save_dir / game_dir / backup_root      — resolved (may be None)
+        nsm_dir                                — NSM under the game dir (may be None)
+        source                                 — where each value came from: config/env/detect/default
+        missing                                — keys that need to be supplied manually
     """
     cfg = load_config(cli_config)
     src = {}
@@ -220,7 +226,7 @@ def resolve(cli_config=None):
     if not save_dir:
         missing.append('save_dir')
     if not game_dir:
-        missing.append('game_dir (可选：只影响 NSM 槽位同步)')
+        missing.append(tr('game_dir (optional; only affects NSM slot sync)'))
 
     nsm_dir = os.path.join(game_dir, 'NSM') if game_dir else None
 
@@ -237,21 +243,21 @@ def resolve(cli_config=None):
 
 
 def describe(res):
-    """把 resolve() 的结果格式化成可直接打印的多行文本。"""
-    lines = ['=== 路径解析 ===']
-    lines.append('  存档目录 : %s' % (res['save_dir'] or '(未找到)'))
+    """Format the result of resolve() as printable multi-line text."""
+    lines = [tr(' === Path resolution ===')]
+    lines.append(tr('   save dir    : %s') % (res['save_dir'] or tr(' (not found)')))
     lines.append('             [%s]' % res['source'].get('save_dir'))
-    lines.append('  游戏目录 : %s' % (res['game_dir'] or '(未找到)'))
+    lines.append(tr('   game dir    : %s') % (res['game_dir'] or tr(' (not found)')))
     lines.append('             [%s]' % res['source'].get('game_dir'))
-    lines.append('  备份目录 : %s' % (res['backup_root'] or '(未找到)'))
+    lines.append(tr('   backup dir  : %s') % (res['backup_root'] or tr(' (not found)')))
     lines.append('             [%s]' % res['source'].get('backup_root'))
-    lines.append('  配置文件 : %s %s' % (
-        res['config_file'], '(存在)' if os.path.isfile(res['config_file']) else '(不存在)'))
+    lines.append(tr('   config file : %s %s') % (
+        res['config_file'], tr(' (exists)') if os.path.isfile(res['config_file']) else tr(' (missing)')))
     for w in res['warnings']:
         lines.append('  !! %s' % w)
     if res['missing']:
-        lines.append('  !! 未能确定的项: %s' % ', '.join(res['missing']))
-        lines.append('     → 请在 config.json 里显式填写，或用 --config 指定配置文件')
+        lines.append(tr('   !! Unresolved items: %s') % ', '.join(res['missing']))
+        lines.append(tr('     -> Set it explicitly in config.json, or pass --config <file>'))
     return '\n'.join(lines)
 
 

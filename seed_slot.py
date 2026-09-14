@@ -1,27 +1,28 @@
 # -*- coding: utf-8 -*-
-r"""NEO Scavenger - 把当前存档播种进 NEO Save Manager 的指定槽位。
+r"""NEO Scavenger - seed the current save into a NEO Save Manager slot.
 
-用途：工具首次安装时三个槽都是 "Empty Slot"，本脚本可提前把当前存档
-写入某个槽，使存档立刻处于受保护状态。
+Purpose: on a fresh install all three slots read "Empty Slot". This script writes
+the current save into a slot ahead of time so the save is protected immediately.
 
-复现批处理行为：
+Reproduces the batch behaviour:
     copy "%savedir%nsSGv1.sol" "%gamedir%\NSM\nsSGv1_g<slot>.sol"
     echo <label>> "%gamedir%\NSM\nsSGv1_g<slot>.ini"
 
-用法：
-    python seed_slot.py                       # 自动探测路径，播种槽1，标签自动生成
+Usage:
+    python seed_slot.py                       # auto-detect paths, seed slot 1, auto label
     python seed_slot.py --slot 2
-    python seed_slot.py --label "第三章 医院前"
-    python seed_slot.py --game "D:\Games\NEO Scavenger" --saves "<存档目录>"
-    python seed_slot.py --dry-run             # 只检查不写入
+    python seed_slot.py --label "Chapter 3 - before the hospital"
+    python seed_slot.py --game "D:\Games\NEO Scavenger" --saves "<save dir>"
+    python seed_slot.py --dry-run             # check only, write nothing
 
-槽位约定：
-    0 = Quicksave 槽（nsSGv1_g0.sol，对应菜单 R/S）
-    1..3 = 三个命名槽（nsSGv1_g1..g3.sol，对应菜单 1/2/3 与 A/B/C）
+Slot convention:
+    0 = Quicksave slot (nsSGv1_g0.sol, menu entry R/S)
+    1..3 = the three named slots (nsSGv1_g1..g3.sol, menu entries 1/2/3 and A/B/C)
 
-说明：本脚本自带一套路径探测（find_savedir / find_gamedir），
-与 nsg_paths.py 的能力重叠 —— 保留独立实现是为了让它可以单文件拿走使用。
-若两处探测行为不一致，**以 nsg_paths.py 为准**。
+Note: this script carries its own path detection (find_savedir / find_gamedir),
+which overlaps nsg_paths.py. The standalone implementation is kept so this file
+can be taken away and used on its own. If the two ever disagree,
+**nsg_paths.py is authoritative**.
 """
 import argparse
 import hashlib
@@ -29,18 +30,21 @@ import os
 import subprocess
 import sys
 import time
+from nsg_i18n import tr
 
-ANCHORS = ('nsTest.sol', 'nsSGv1.sol')          # 用于反查存档目录的锚点文件
+ANCHORS = ('nsTest.sol', 'nsSGv1.sol')          # anchor files used to locate the save dir
 SAVE_NAME = 'nsSGv1.sol'
-# cmd 特殊字符：标签会被 echo ... Game1 (%game1name%) 包裹，含 ) 会破坏语句
+# cmd special characters: the label is wrapped by echo ... Game1 (%game1name%),
+# so a ) would break the statement
 FORBIDDEN = set('&|<>^%()')
 
 
 def appdata_dir():
-    r"""解析 %APPDATA%。
+    r"""Resolve %APPDATA%.
 
-    注意：沙箱内 Bash 启动的 Python **可能没有 APPDATA 环境变量**，
-    因此必须多级回退（实测本机 Bash 通道下 APPDATA 为 None）。
+    Note: Python launched from a sandboxed Bash shell may **lack the APPDATA
+    environment variable**, so several fallbacks are required (measured on this
+    machine: APPDATA is None under the Bash channel).
     """
     v = os.environ.get('APPDATA')
     if v and os.path.isdir(v):
@@ -62,7 +66,7 @@ def appdata_dir():
 
 
 def find_savedir(explicit=None):
-    """定位 Flash SharedObject 存档目录（以锚点文件匹配，不猜随机串目录名）"""
+    """Locate the Flash SharedObject save dir (match anchor files, never guess the random dir name)"""
     if explicit:
         return explicit if os.path.isdir(explicit) else None
     appdata = appdata_dir()
@@ -77,7 +81,7 @@ def find_savedir(explicit=None):
             hits.append(root)
     if not hits:
         return None
-    # 优先取含真实存档的那个
+    # prefer the one that holds the real save
     for h in hits:
         if os.path.isfile(os.path.join(h, SAVE_NAME)):
             return h
@@ -85,23 +89,24 @@ def find_savedir(explicit=None):
 
 
 def find_gamedir(savedir):
-    r"""从存档目录反推游戏目录。
+    r"""Reverse-derive the game directory from the save directory.
 
-    Flash 的 SharedObject 路径形如：
-        %APPDATA%\...\#SharedObjects\<随机串>\localhost\<游戏路径去掉盘符>\<exe名>
-    注意「去掉盘符」——`C:` 被剥掉了，因此不能直接拼接，必须跨盘符探测。
-    例：...\localhost\Program Files (x86)\Steam\steamapps\common\NEO Scavenger\NEOScavenger.exe
+    Flash's SharedObject path looks like:
+        %APPDATA%\...\#SharedObjects\<random>\localhost\<game path without drive>\
+    Note "without drive" — `C:` has been stripped, so the parts cannot simply be
+    concatenated; every drive letter must be probed.
+    e.g. ...\localhost\Program Files (x86)\Steam\steamapps\common\NEO Scavenger\NEOScavenger.exe
     """
     parts = savedir.split(os.sep)
     try:
         i = next(i for i, p in enumerate(parts) if p.startswith('#SharedObjects'))
     except StopIteration:
         return None
-    rest = parts[i + 3:]                      # 跳过 #SharedObjects\<随机串>\localhost
+    rest = parts[i + 3:]                      # skip #SharedObjects\<random>\localhost
     if len(rest) < 2:
         return None
-    exe_name = rest[-1]                       # 末段是 exe 文件名
-    rel_dir = os.sep.join(rest[:-1])          # 其余是 exe 所在目录（不含盘符）
+    exe_name = rest[-1]                       # last segment is the exe filename
+    rel_dir = os.sep.join(rest[:-1])          # the rest is the exe's directory (no drive)
     for drive in 'CDEFGHIJKLMNOPQRSTUVWXYZAB':
         cand = drive + ':' + os.sep + rel_dir
         if os.path.isfile(os.path.join(cand, exe_name)):
@@ -117,11 +122,11 @@ def sha256(path):
 def validate_label(label):
     bad = sorted(FORBIDDEN & set(label))
     if bad:
-        raise SystemExit('标签含 cmd 特殊字符 %s，会导致批处理 echo 语句出错，请改掉' % ''.join(bad))
+        raise SystemExit(tr('The label contains cmd special character(s) %s, which breaks the batch echo statement; please change it') % ''.join(bad))
     try:
         label.encode('gbk')
     except UnicodeEncodeError:
-        raise SystemExit('标签含 GBK 无法表示的字符，控制台会乱码')
+        raise SystemExit(tr('The label contains characters that GBK cannot represent; the console will show mojibake'))
 
 
 def game_running():
@@ -137,68 +142,68 @@ def game_running():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--slot', type=int, default=1, choices=[0, 1, 2, 3])
-    ap.add_argument('--label', default=None, help='槽位描述，默认 "存档 YYYY-MM-DD HH:MM"')
-    ap.add_argument('--game', default=None, help='游戏目录（覆盖自动探测）')
-    ap.add_argument('--saves', default=None, help='存档目录（覆盖自动探测）')
+    ap.add_argument('--label', default=None, help=tr('slot label; defaults to "Save YYYY-MM-DD HH:MM"'))
+    ap.add_argument('--game', default=None, help=tr('game directory (overrides auto-detection)'))
+    ap.add_argument('--saves', default=None, help=tr('save directory (overrides auto-detection)'))
     ap.add_argument('--dry-run', action='store_true')
     a = ap.parse_args()
 
-    print('=== 1. 定位目录 ===')
+    print(tr(' === 1. Locate directories ==='))
     savedir = find_savedir(a.saves)
     if not savedir:
-        raise SystemExit('未能定位存档目录，请用 --saves 指定')
+        raise SystemExit(tr('Could not locate the save directory; specify it with --saves'))
     gamedir = a.game or find_gamedir(savedir)
     if not gamedir or not os.path.isdir(gamedir):
-        raise SystemExit('未能定位游戏目录（推得 %r），请用 --game 指定' % gamedir)
-    print('  存档目录 :', savedir)
-    print('  游戏目录 :', gamedir)
+        raise SystemExit(tr('Could not locate the game directory (derived %r); specify it with --game') % gamedir)
+    print(tr('   save dir    :'), savedir)
+    print(tr('   game dir    :'), gamedir)
 
     src = os.path.join(savedir, SAVE_NAME)
     if not os.path.isfile(src):
-        raise SystemExit('当前存档不存在：%s（游戏是否已 "Quit and Save"？）' % src)
+        raise SystemExit(tr('Current save not found: %s (did the game "Quit and Save"?)') % src)
     nsm = os.path.join(gamedir, 'NSM')
     if not os.path.isdir(nsm):
-        raise SystemExit('NSM 目录不存在：%s（NEO Save Manager 装了吗？）' % nsm)
+        raise SystemExit(tr('NSM directory does not exist: %s (is NEO Save Manager installed?)') % nsm)
 
     print()
-    print('=== 2. 前置条件 ===')
+    print(tr(' === 2. Prerequisites ==='))
     st = os.stat(src)
-    print('  源存档      : %d B  mtime %s' % (
+    print(tr('   source save : %d B  mtime %s') % (
         st.st_size, time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(st.st_mtime))))
     running = game_running()
-    print('  游戏进程    : %s' % ('运行中 ⚠' if running else '未运行 ✓' if running is False else '检测失败'))
+    print(tr('   game process: %s') % (tr('running ⚠') if running else tr('not running ✓') if running is False else tr('detection failed')))
     if running:
-        print('    !! 建议先完全退出游戏，否则可能拷贝到半写入的存档')
+        print(tr('     !! Fully quit the game first, otherwise you may copy a half-written save'))
 
     dst = os.path.join(nsm, 'nsSGv1_g%d.sol' % a.slot)
     lbl = os.path.join(nsm, 'nsSGv1_g%d.ini' % a.slot)
-    print('  目标槽位    :', os.path.basename(dst))
+    print(tr('   target slot :'), os.path.basename(dst))
     for p in (dst, lbl):
         print('    %-22s %s' % (os.path.basename(p),
-              ('已存在 %d B（将被覆盖）' % os.path.getsize(p)) if os.path.exists(p) else '不存在'))
+              (tr('exists, %d B (will be overwritten)') % os.path.getsize(p)) if os.path.exists(p) else tr('missing')))
 
-    label = a.label or time.strftime('存档 %Y-%m-%d %H:%M', time.localtime(st.st_mtime))
+    label = a.label or time.strftime(tr('Save %Y-%m-%d %H:%M'), time.localtime(st.st_mtime))
     validate_label(label)
-    print('  标签        : %r  -> GBK %d 字节' % (label, len(label.encode('gbk'))))
+    print(tr('   label       : %r  -> GBK %d bytes') % (label, len(label.encode('gbk'))))
 
     if a.dry_run:
         print()
-        print('--dry-run：未做任何写入')
+        print(tr(' --dry-run: nothing was written'))
         return
 
     print()
-    print('=== 3. 播种 ===')
+    print(tr(' === 3. Seeding ==='))
     src_h = sha256(src)
     with open(src, 'rb') as f:
         data = f.read()
     with open(dst, 'wb') as f:
         f.write(data)
     dst_h = sha256(dst)
-    print('  源 SHA256 :', src_h)
-    print('  槽 SHA256 :', dst_h)
-    print('  哈希一致  :', src_h == dst_h)
+    print(tr('   source SHA256 :'), src_h)
+    print(tr('   slot SHA256 :'), dst_h)
+    print(tr('   hash match  :'), src_h == dst_h)
     if src_h != dst_h:
-        raise SystemExit('哈希不一致，复制失败')
+        raise SystemExit(tr('hash mismatch, copy failed'))
 
     with open(lbl, 'wb') as f:
         f.write((label + '\r\n').encode('gbk'))
@@ -206,11 +211,11 @@ def main():
     print('  %s = %r  (BOM=%s)' % (os.path.basename(lbl), raw, raw[:3] == b'\xef\xbb\xbf'))
 
     print()
-    print('=== 4. NSM 目录最终内容 ===')
+    print(tr(' === 4. Final contents of the NSM directory ==='))
     for fn in sorted(os.listdir(nsm)):
         print('  %8d B  %s' % (os.path.getsize(os.path.join(nsm, fn)), fn))
     print()
-    print('完成。启动 NEOSaveManager.bat，按 %d 即可从该槽读档。' % a.slot)
+    print(tr('Done. Launch NEOSaveManager.bat and press %d to load from this slot.') % a.slot)
 
 
 if __name__ == '__main__':

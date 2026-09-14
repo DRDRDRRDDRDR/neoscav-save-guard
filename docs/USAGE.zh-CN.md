@@ -1,6 +1,7 @@
 # NEO Scavenger 存档守护 —— 中文使用说明
 
 本文是 README 的详细中文补充，面向日常使用与故障排查。
+英文版（主文档）见 [USAGE.md](USAGE.md)。
 
 ---
 
@@ -26,7 +27,7 @@
 **开游戏时会自动打开**，通常不必手动点。需要手动打开时，双击：
 
 ```
-存档回档器.pyw
+save_rollback_gui.pyw
 ```
 
 （重复打开不会出现两个窗口：程序用命名互斥量做单实例保护，
@@ -57,15 +58,19 @@
 ### 命令行等价用法
 
 ```
-存档回档器.pyw --list                          列出所有快照
-存档回档器.pyw --restore latest --yes          回档到最新一份
-存档回档器.pyw --restore 3 --yes               回档到列表中第 3 份
-存档回档器.pyw --restore-slot 2                把最新快照写入槽 2
-存档回档器.pyw --status                        查看状态
+save_rollback_gui.pyw --list                          列出所有快照
+save_rollback_gui.pyw --restore latest --yes          回档到最新一份
+save_rollback_gui.pyw --restore 3 --yes               回档到列表中第 3 份
+save_rollback_gui.pyw --restore-slot 2                把最新快照写入槽 2
+save_rollback_gui.pyw --status                        查看状态
 ```
 
 > 命令行要用**含 tkinter 的 Python** 运行；GUI 模式不加参数双击即可
 > （`.pyw` 已关联 `pyw.exe`，不弹黑框）。
+>
+> **界面语言**：默认英文。想要中文界面，设 `NSG_LANG=zh` 环境变量，
+> 或在 `config.json` 里写 `{"lang": "zh"}`。详见 README 的「界面语言」一节。
+> 注：旧版文件名 `存档回档器.pyw` 仍被监视器识别，从 v1.0.0 迁移的部署无需改动。
 
 ---
 

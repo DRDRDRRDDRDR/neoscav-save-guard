@@ -85,6 +85,33 @@ Auto-detection works because Flash stores local SWF objects under
 locates the save directory, and the **game directory is reverse-derived** from that same
 path — so a different username, drive letter, or Steam library needs no edits.
 
+## Language
+
+The toolkit ships in **English** and **Simplified Chinese**. Every user-facing string goes
+through `nsg_i18n.tr()`, and the language is resolved in this order:
+
+1. `NSG_LANG` environment variable (`en` / `zh`)
+2. `lang` key in `config.json` (next to the scripts, or passed with `--config <file>`)
+3. Default — `en`
+
+```bat
+set NSG_LANG=zh
+python save_rollback_gui.pyw --list
+```
+
+Or make it permanent in `config.json`:
+
+```json
+{ "lang": "zh" }
+```
+
+Source strings are English; `_ZH` in `nsg_i18n.py` holds the Chinese table. Adding a
+language is one dictionary plus one entry in `SUPPORTED`.
+
+> Two things are intentionally **not** translated: the Windows scheduled-task name, and the
+> `schtasks` output labels the status command matches on. Both are locale-dependent OS
+> surface — translating them would break task lookup on a Chinese Windows install.
+
 ## Command line
 
 **Watcher** — `neo_save_watcher.py`
@@ -109,7 +136,7 @@ path — so a different username, drive letter, or Steam library needs no edits.
 | `seed` | copy the newest snapshot into NSM slots (`--slots 1,0`) |
 | `restart` | restart the task — **required after editing the watcher** |
 
-**Rollback** — `存档回档器.pyw` (double-click for the GUI)
+**Rollback** — `save_rollback_gui.pyw` (double-click for the GUI)
 
 | Flag | Meaning |
 |---|---|
@@ -233,6 +260,29 @@ python autobackup_setup.py uninstall    :: 只删计划任务，备份文件保�
    被截断的快照会标红并拒绝回档 —— 否则游戏读不出存档，
    现象只是"回档后游戏打不开"，很难定位。
 
+### 界面语言
+
+工具内置**英文**与**简体中文**两套界面文案，所有面向用户的字符串都经由 `nsg_i18n.tr()`
+输出。语言解析顺序：`NSG_LANG` 环境变量 → `config.json` 里的 `lang` 键 → 默认 `en`。
+
+```bat
+set NSG_LANG=zh
+python save_rollback_gui.pyw --list
+```
+
+或写进 `config.json` 长期生效：
+
+```json
+{ "lang": "zh" }
+```
+
+代码里的源字符串是英文，中文放在 `nsg_i18n.py` 的 `_ZH` 表里；新增一门语言 = 加一张表 +
+在 `SUPPORTED` 里加一项。
+
+> 有两处**故意不翻译**：Windows 计划任务名，以及状态命令用来匹配的 `schtasks` 输出标签。
+> 这两者属于跟随系统区域设置变化的操作系统表层内容，翻译了反而会导致中文 Windows 上
+> 任务查不到。
+
 ### 常用命令
 
 ```bat
@@ -241,9 +291,9 @@ python autobackup_setup.py restart      :: 改过 neo_save_watcher.py 后重启�
 python neo_save_watcher.py --check      :: 查看路径解析明细
 
 :: 回档器（双击即 GUI）
-存档回档器.pyw --list                   :: 列出全部快照（含完整性）
-存档回档器.pyw --restore latest --yes   :: 回档到最新一份
-存档回档器.pyw --status                 :: 查看状态
+save_rollback_gui.pyw --list                   :: 列出全部快照（含完整性）
+save_rollback_gui.pyw --restore latest --yes   :: 回档到最新一份
+save_rollback_gui.pyw --status                 :: 查看状态
 ```
 
 > **改完代码必须重启才生效**：常驻进程不会自动加载新代码。

@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-r"""NEO Scavenger 存档自动备份监视器
+r"""NEO Scavenger save auto-backup watcher
 
-由 Windows 计划任务在登录时以隐藏窗口常驻运行（pythonw.exe）。
+Run resident by a Windows scheduled task at logon with a hidden window
+(pythonw.exe).
 
-职责：
-  1. 检测到 NEOScavenger.exe 进程启动 → 立刻快照当前存档（reason=start）
-  2. 检测到 nsSGv1.sol 内容变化     → 立刻快照（reason=save，即游戏内 Quit and Save）
-  3. 可选：把最新快照同步刷新到 NEO Save Manager 的 Quicksave 槽（nsSGv1_g0.sol）
-  4. 滚动保留最近 KEEP_LAST 份快照，自动清理更旧的
+Responsibilities:
+  1. NEOScavenger.exe process starts   -> snapshot the current save at once (reason=start)
+  2. nsSGv1.sol content changes        -> snapshot at once (reason=save, i.e. in-game Quit and Save)
+  3. Optional: mirror the newest snapshot into NEO Save Manager's Quicksave slot (nsSGv1_g0.sol)
+  4. Prune old snapshots using a time-layered retention policy
 
-设计要点：
-  · 备份落在游戏目录之外（用户文档目录下），因此工具菜单里的 D)/W) 都删不到它
-  · 所有读取都走 read_stable()：双次读取 + mtime/size/内容比对，
-    避免在游戏正在写盘时读到半截文件
-  · 不依赖任何第三方库（无 psutil），进程检测用 Win32 Toolhelp32 快照
-  · 纯轮询，每 POLL_SEC 秒一次；睡眠期间几乎不占资源
-  · 路径不硬编码：环境变量 → config.json → 自动探测（见 nsg_paths.py）
+Design notes:
+  · Backups land outside the game directory (under the user's Documents), so the
+    in-game D) / W) menu entries cannot delete them
+  · Every read goes through read_stable(): two reads compared on mtime/size/content,
+    so a half-written file is never captured while the game is saving
+  · No third-party dependencies (no psutil); process detection uses a Win32
+    Toolhelp32 snapshot
+  · Pure polling every POLL_SEC seconds; it costs almost nothing while sleeping
+  · Paths are not hard-coded: env vars -> config.json -> auto-detection (see nsg_paths.py)
 
-用法：
-  pythonw.exe neo_save_watcher.py            # 常驻（计划任务用这个）
-  python    neo_save_watcher.py --once       # 只跑一轮，便于测试
+Usage:
+  pythonw.exe neo_save_watcher.py            # resident (what the scheduled task uses)
+  python    neo_save_watcher.py --once       # one cycle only, handy for testing
   python    neo_save_watcher.py --once --dry-run
-  python    neo_save_watcher.py --check      # 打印路径解析与环境探测结果后退出
+  python    neo_save_watcher.py --check      # print path resolution + probe, then exit
   python    neo_save_watcher.py --config D:\my\config.json
 """
 
@@ -37,56 +40,66 @@ import sys
 import time
 from datetime import datetime
 
-# ---------------------------------------------------------------- 路径解析
-# 路径不再硬编码：由 nsg_paths 按 【环境变量 → config.json → 自动探测】 的顺序解析。
-# 必须在模块级完成，因为 STATE_FILE / LOG_FILE 是下面直接推导出来的。
+# ---------------------------------------------------------------- path resolution
+# Paths are no longer hard-coded: nsg_paths resolves them in the order
+# [environment variable -> config.json -> auto-detection].
+# This must happen at module level, because STATE_FILE / LOG_FILE below are
+# derived directly from it.
 import nsg_paths
+from nsg_i18n import tr
 
-# 先手工扫一遍 --config（此刻 argparse 还没跑，见 nsg_paths.cli_config_arg 的说明）
+# Scan for --config by hand first (argparse has not run yet; see
+# nsg_paths.cli_config_arg for the rationale)
 _CONFIG_ARG = nsg_paths.cli_config_arg()
 PATHS = nsg_paths.resolve(_CONFIG_ARG)
 _CFG = nsg_paths.load_config(_CONFIG_ARG)
 
-SAVE_DIR = PATHS['save_dir']          # 可能为 None，main() 会给出可读的报错
-GAME_DIR = PATHS['game_dir']          # 可能为 None（只影响 NSM 槽位同步）
+SAVE_DIR = PATHS['save_dir']          # may be None; main() reports it readably
+GAME_DIR = PATHS['game_dir']          # may be None (only affects NSM slot sync)
 NSM_DIR = PATHS['nsm_dir']
 BACKUP_ROOT = PATHS['backup_root']
 
 SAVE_NAME = nsg_paths.SAVE_NAME
 GAME_EXE = nsg_paths.GAME_EXE
 
-# 运行时参数：config.json 里给了就用 config 的，否则用这里的默认值
-POLL_SEC = int(_CFG.get('poll_sec', 10))                     # 轮询间隔（秒）
-REFRESH_G0 = bool(_CFG.get('refresh_g0', True))              # 同步刷新 NSM 的 Quicksave 槽
+# Runtime parameters: use config.json when it provides them, else these defaults
+POLL_SEC = int(_CFG.get('poll_sec', 10))                     # poll interval (seconds)
+REFRESH_G0 = bool(_CFG.get('refresh_g0', True))              # mirror into NSM's Quicksave slot
 SNAP_ON_GAME_START = bool(_CFG.get('snap_on_game_start', True))
 LAUNCH_GUI_ON_GAME_START = bool(_CFG.get('launch_gui_on_game_start', True))
-LOG_MAX_BYTES = 1 << 20  # 日志滚动的阈值（1 MiB）
+LOG_MAX_BYTES = 1 << 20  # log rotation threshold (1 MiB)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# 回档器 GUI 与本脚本同目录
-GUI_SCRIPT = os.path.join(HERE, '存档回档器.pyw')
+# The rollback GUI ships next to this script. The legacy Chinese filename is
+# still accepted so that deployments migrated from v1.0.0 keep working.
+GUI_SCRIPT = os.path.join(HERE, 'save_rollback_gui.pyw')
+if not os.path.isfile(GUI_SCRIPT):
+    GUI_SCRIPT = os.path.join(HERE, '存档回档器.pyw')
 
-# --- 冷却：默认关闭（0）
-# 曾经设为 30 秒，但实测发现这个设计有害：存档变化时若处在冷却期内会推迟快照，
-# 而"死亡"会在推迟窗口内把存档文件直接删掉 —— 于是那份状态永久丢失。
-# 实测证据：17:02:04 检测到 198,511 B，因距上次快照仅 21s < 30s 被推迟，
-#           10 秒后文件消失，该状态无法找回。
-# 因为保留策略已按时间分层、总量有硬上限，取消冷却不会有磁盘风险。
+# --- Cooldown: disabled by default (0)
+# It used to be 30 seconds, but measurement showed the design is harmful: a save
+# change falling inside the cooldown defers the snapshot, and "death" deletes the
+# save file inside that deferral window -- so that state is lost permanently.
+# Measured evidence: 198,511 B detected at 17:02:04, deferred because only 21 s
+# had passed since the last snapshot (< 30 s); the file was gone 10 s later and
+# that state could never be recovered.
+# Retention is now time-layered with a hard total cap, so dropping the cooldown
+# carries no disk-usage risk.
 MIN_SNAPSHOT_GAP_SEC = 0
 
-# --- 按时间分层的保留策略（比"只留最近 N 份"更符合直觉）
-KEEP_ALL_SEC = 2 * 3600      # 最近 2 小时：逐份全留
-HOURLY_UNTIL_SEC = 48 * 3600  # 2h ~ 48h：每小时留 1 份
-DAILY_AFTER_SEC = 48 * 3600   # 超过 48h：每天留 1 份
-MAX_TOTAL_FILES = 600         # 硬上限：总份数
-MAX_TOTAL_MB = 300            # 硬上限：总体积（MB）
+# --- Time-layered retention (more intuitive than "keep the last N files")
+KEEP_ALL_SEC = 2 * 3600      # last 2 hours: keep every snapshot
+HOURLY_UNTIL_SEC = 48 * 3600  # 2h ~ 48h: keep one per hour
+DAILY_AFTER_SEC = 48 * 3600   # beyond 48h: keep one per day
+MAX_TOTAL_FILES = 600         # hard cap: number of files
+MAX_TOTAL_MB = 300            # hard cap: total size (MB)
 
 STATE_FILE = os.path.join(BACKUP_ROOT, 'watcher_state.json')
 LOG_FILE = os.path.join(BACKUP_ROOT, 'watcher.log')
 
 
-# ---------------------------------------------------------------- 工具
-if sys.stdout is None:                       # pythonw.exe 下 stdout 为 None
+# ---------------------------------------------------------------- utilities
+if sys.stdout is None:                       # stdout is None under pythonw.exe
     sys.stdout = open(os.devnull, 'w')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w')
@@ -113,10 +126,12 @@ def sha256_bytes(b):
 
 
 def read_stable(path, tries=6, delay=0.25):
-    r"""稳定化读取：连续两次读取的 (mtime, size, 内容) 完全一致才返回。
+    r"""Stabilised read: return only when two consecutive reads agree on
+    (mtime, size, content).
 
-    游戏运行中 Flash 可能正在写 nsSGv1.sol，直接读有拿到半截文件的风险。
-    失败返回 None（宁可这轮不备份，也不写一份坏快照）。
+    While the game is running Flash may be writing nsSGv1.sol, so a plain read
+    risks capturing a truncated file. Returns None on failure -- it is better to
+    skip a cycle than to write a corrupt snapshot.
     """
     for _ in range(tries):
         try:
@@ -135,11 +150,11 @@ def read_stable(path, tries=6, delay=0.25):
         if (s1.st_mtime == s2.st_mtime and s1.st_size == s2.st_size
                 and len(d1) == len(d2) and d1 == d2):
             return d2
-    log('  !! read_stable 失败（文件持续变化），本轮跳过：%s' % path)
+    log(tr('   !! read_stable failed (file keeps changing), skipping this cycle: %s') % path)
     return None
 
 
-# ---------------------------------------------------------------- 进程检测
+# ---------------------------------------------------------------- process detection
 TH32CS_SNAPPROCESS = 0x00000002
 
 
@@ -159,7 +174,7 @@ class PROCESSENTRY32(ctypes.Structure):
 
 
 def process_running(exe_name=GAME_EXE):
-    """用 Toolhelp32 快照检测进程，避免反复 spawn tasklist"""
+    """Detect a process via a Toolhelp32 snapshot, avoiding repeated tasklist spawns"""
     k32 = ctypes.windll.kernel32
     snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
     if snap == -1 or snap == 0xFFFFFFFF:
@@ -178,14 +193,16 @@ def process_running(exe_name=GAME_EXE):
         k32.CloseHandle(snap)
 
 
-# ---------------------------------------------------------------- 带起 GUI
+# ---------------------------------------------------------------- launching the GUI
 def _pythonw():
-    r"""挑一个无控制台的解释器来跑 GUI。
+    r"""Pick a console-less interpreter to run the GUI.
 
-    本脚本由计划任务用 pythonw.exe 承载，所以 sys.executable 通常已经是
-    pythonw.exe；但若被人用 python.exe 手动跑，要换成同目录的 pythonw.exe，
-    否则会顺带弹出一个黑框。注意这里必须用【宿主】的 Python（含 tkinter），
-    沙箱内 WorkBuddy 的 managed Python 没有 tkinter。
+    This script is hosted by pythonw.exe through the scheduled task, so
+    sys.executable is normally already pythonw.exe. But if someone runs it by
+    hand with python.exe, switch to the sibling pythonw.exe -- otherwise a
+    console window pops up as a side effect. Note that this must be the
+    *host* Python (the one with tkinter); WorkBuddy's managed Python inside the
+    sandbox has no tkinter.
     """
     exe = sys.executable or ''
     d, n = os.path.split(exe)
@@ -197,15 +214,16 @@ def _pythonw():
 
 
 def launch_gui():
-    r"""带起回档器 GUI。单实例保护在 GUI 侧（命名 mutex），
-    所以这里可以无条件 spawn —— 已在运行时会自动切到那个窗口。
+    r"""Bring up the rollback GUI. Single-instance protection lives on the GUI
+    side (a named mutex), so this can spawn unconditionally -- when it is already
+    running the existing window is focused instead.
     """
     if not os.path.isfile(GUI_SCRIPT):
-        log('  !! 无法带起 GUI：脚本不存在 %s' % GUI_SCRIPT)
+        log(tr('   !! Cannot launch the GUI: script not found %s') % GUI_SCRIPT)
         return False
     exe = _pythonw()
     if not os.path.isfile(exe):
-        log('  !! 无法带起 GUI：解释器不存在 %s' % exe)
+        log(tr('   !! Cannot launch the GUI: interpreter not found %s') % exe)
         return False
     try:
         DETACHED_PROCESS = 0x00000008
@@ -213,14 +231,14 @@ def launch_gui():
         subprocess.Popen([exe, GUI_SCRIPT],
                          creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
                          close_fds=True)
-        log('  ~~ 已带起回档器 GUI (%s)' % os.path.basename(exe))
+        log(tr('   ~~ Rollback GUI launched (%s)') % os.path.basename(exe))
         return True
     except Exception as e:
-        log('  !! 带起 GUI 失败: %r' % e)
+        log(tr('   !! Failed to launch the GUI: %r') % e)
         return False
 
 
-# ---------------------------------------------------------------- 状态
+# ---------------------------------------------------------------- state
 def load_state():
     try:
         with open(STATE_FILE, encoding='utf-8') as f:
@@ -235,34 +253,35 @@ def save_state(st):
         with open(STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(st, f, ensure_ascii=False, indent=1)
     except Exception as e:
-        log('  !! 状态写入失败: %s' % e)
+        log(tr('   !! Failed to write state: %s') % e)
 
 
-# ---------------------------------------------------------------- 备份
+# ---------------------------------------------------------------- backup
 def snapshot(data, reason, dry_run=False):
-    """写入一份带时间戳的快照，返回快照路径"""
+    """Write one timestamped snapshot and return its path"""
     os.makedirs(BACKUP_ROOT, exist_ok=True)
     ts = datetime.now().strftime('%Y%m%d-%H%M%S')
     dst = os.path.join(BACKUP_ROOT, 'nsSGv1_%s_%s.sol' % (ts, reason))
     if os.path.exists(dst):
         dst = os.path.join(BACKUP_ROOT, 'nsSGv1_%s_%s_%d.sol' % (ts, reason, os.getpid()))
     if dry_run:
-        log('  [dry-run] 将写入快照 %s (%d B)' % (os.path.basename(dst), len(data)))
+        log(tr('   [dry-run] would write snapshot %s (%d B)') % (os.path.basename(dst), len(data)))
         return dst
     with open(dst, 'wb') as f:
         f.write(data)
-    log('  >> 快照 %s  (%d B, %s)' % (os.path.basename(dst), len(data), reason))
+    log(tr('   >> snapshot %s  (%d B, %s)') % (os.path.basename(dst), len(data), reason))
     return dst
 
 
 def prune(dry_run=False):
-    r"""清理 auto\ 目录内的快照，绝不触碰其他目录。
+    r"""Clean up snapshots inside auto\ and never touch any other directory.
 
-    按时间分层保留：
-      最近 KEEP_ALL_SEC            —— 逐份全留
-      KEEP_ALL_SEC ~ HOURLY_UNTIL  —— 每小时留 1 份
-      超过 DAILY_AFTER_SEC         —— 每天留 1 份
-    再套一层硬上限（MAX_TOTAL_FILES / MAX_TOTAL_MB），超了就丢最旧的。
+    Time-layered retention:
+      within KEEP_ALL_SEC                  -- keep every snapshot
+      KEEP_ALL_SEC ~ HOURLY_UNTIL_SEC      -- keep one per hour
+      beyond DAILY_AFTER_SEC               -- keep one per day
+    Then a hard cap layer (MAX_TOTAL_FILES / MAX_TOTAL_MB) drops the oldest
+    entries when exceeded.
     """
     try:
         names = [n for n in os.listdir(BACKUP_ROOT)
@@ -298,17 +317,17 @@ def prune(dry_run=False):
             seen_bucket.add(bucket)
             keep.add(n)
 
-    # 硬上限：先按份数
+    # Hard cap: first by file count
     ordered = [n for _ts, n in entries]
     if len(keep) > MAX_TOTAL_FILES:
         newest_first = [n for n in ordered if n in keep]
         keep = set(newest_first[:MAX_TOTAL_FILES])
-    # 再按总体积
+    # ...then by total size
     size_of = lambda n: os.path.getsize(os.path.join(BACKUP_ROOT, n))
     total = sum(size_of(n) for n in keep)
     limit = MAX_TOTAL_MB * 1024 * 1024
     if total > limit:
-        for n in [x for x in ordered if x in keep][::-1]:   # 从最旧的开始丢
+        for n in [x for x in ordered if x in keep][::-1]:   # drop oldest first
             if total <= limit:
                 break
             keep.discard(n)
@@ -320,19 +339,19 @@ def prune(dry_run=False):
             continue
         p = os.path.join(BACKUP_ROOT, n)
         if dry_run:
-            log('  [dry-run] 将删除旧快照 %s' % n)
+            log(tr('   [dry-run] would delete old snapshot %s') % n)
         else:
             try:
                 os.remove(p)
                 removed += 1
             except Exception as e:
-                log('  !! 清理失败 %s: %s' % (n, e))
+                log(tr('   !! Prune failed %s: %s') % (n, e))
     if removed:
-        log('  -- 清理 %d 份旧快照（保留 %d 份）' % (removed, len(keep)))
+        log(tr('   -- pruned %d old snapshot(s), %d kept') % (removed, len(keep)))
 
 
 def newest_snapshot_hash():
-    r"""读取 auto\ 中最新一份快照的哈希，用于跨进程重启去重"""
+    r"""Hash of the newest snapshot in auto\, used to de-duplicate across restarts"""
     try:
         names = sorted([n for n in os.listdir(BACKUP_ROOT)
                         if n.startswith('nsSGv1_') and n.endswith('.sol')], reverse=True)
@@ -348,42 +367,43 @@ def newest_snapshot_hash():
 
 
 def refresh_quicksave(snapshot_path, dry_run=False):
-    """把最新快照同步到 NEO Save Manager 的 Quicksave 槽（g0）"""
+    """Mirror the newest snapshot into NEO Save Manager's Quicksave slot (g0)"""
     if not REFRESH_G0:
         return
     if not NSM_DIR:
-        return                     # 没探测到游戏目录，跳过（非致命）
+        return                     # game dir not detected; skip (non-fatal)
     nsm = NSM_DIR
     if not os.path.isdir(nsm):
         return
     dst = os.path.join(nsm, 'nsSGv1_g0.sol')
     if dry_run:
-        log('  [dry-run] 将刷新 Quicksave 槽 -> %s' % dst)
+        log(tr('   [dry-run] would refresh the Quicksave slot -> %s') % dst)
         return
     try:
         with open(snapshot_path, 'rb') as s, open(dst, 'wb') as d:
             d.write(s.read())
-        log('  ~~ 已刷新 Quicksave 槽 (g0)')
+        log(tr('   ~~ Quicksave slot refreshed (g0)'))
     except Exception as e:
-        log('  !! 刷新 Quicksave 槽失败: %s' % e)
+        log(tr('   !! Failed to refresh the Quicksave slot: %s') % e)
 
 
-# ---------------------------------------------------------------- 主循环
+# ---------------------------------------------------------------- main loop
 def cycle(st, dry_run=False):
-    """一个轮询周期"""
+    """One polling cycle"""
     src = os.path.join(SAVE_DIR, SAVE_NAME)
     new_snapshot = None
 
     running = process_running()
     if running is None:
-        log('  !! 进程检测失败，跳过进程逻辑')
+        log(tr('   !! Process detection failed, skipping process logic'))
 
-    # 跨重启去重：拿 auto\ 里最新一份快照的哈希兜底
+    # De-duplicate across restarts: fall back to the hash of the newest snapshot
     baseline = st.get('last_hash') or newest_snapshot_hash()
 
-    # --- 1) 游戏刚启动 → 带起 GUI + 快照
-    # 注意用「状态翻转」而非「当前正在运行」来判断：st['game_was_running'] 在每轮
-    # 末尾才更新，所以一次启动只会命中一个周期，不会反复 spawn。
+    # --- 1) Game just started -> bring up the GUI + snapshot
+    # Judge on the state *transition*, not on "is it running now":
+    # st['game_was_running'] is only updated at the end of each cycle, so one
+    # launch matches exactly one cycle and cannot spawn repeatedly.
     if running and st.get('game_was_running') is False:
         if LAUNCH_GUI_ON_GAME_START and not dry_run:
             launch_gui()
@@ -392,35 +412,37 @@ def cycle(st, dry_run=False):
             if data:
                 h = sha256_bytes(data)
                 if h != baseline:
-                    log('检测到游戏启动 -> 快照当前存档')
+                    log(tr('Game start detected -> snapshot the current save'))
                     new_snapshot = snapshot(data, 'start', dry_run)
                     st['last_hash'] = h
                     st['last_snapshot_ts'] = time.time()
                 else:
-                    log('检测到游戏启动，但存档与上次快照一致，跳过')
+                    log(tr('Game start detected, but the save matches the last snapshot; skipping'))
 
-    # --- 2) 存档内容变化 → 快照
-    # 冷却默认关闭：推迟快照会在"死亡删档"场景下永久丢失该状态，见常量处注释。
+    # --- 2) Save content changed -> snapshot
+    # Cooldown is off by default: deferring a snapshot loses that state for good
+    # in the "death deletes the save" scenario -- see the constant above.
     data = read_stable(src)
     if data is None:
-        # 只在状态翻转时记一次，否则存档缺失会每 10 秒刷屏
+        # Log once per transition only; otherwise a missing save spams the log
+        # every 10 seconds.
         if not st.get('save_missing'):
-            log('!! 存档不可读或不存在（可能已被游戏删除）')
+            log(tr(' !! Save is unreadable or missing (the game may have deleted it)'))
             st['save_missing'] = True
     else:
         if st.get('save_missing'):
-            log('存档已重新出现')
+            log(tr('Save reappeared'))
             st['save_missing'] = False
         h = sha256_bytes(data)
         baseline = st.get('last_hash') or newest_snapshot_hash()
         if h != baseline:
             since = time.time() - st.get('last_snapshot_ts', 0)
             if MIN_SNAPSHOT_GAP_SEC and since < MIN_SNAPSHOT_GAP_SEC:
-                # 不更新 last_hash，下轮重试；只推迟，不丢事件
-                log('存档已变化 (%d B)，距上次快照仅 %.0fs < 冷却 %ds，本轮推迟'
+                # Do not update last_hash; retry next cycle. Defer only, never drop.
+                log(tr('Save changed (%d B) only %.0fs after the last snapshot < cooldown %ds, deferring this cycle')
                     % (len(data), since, MIN_SNAPSHOT_GAP_SEC))
             else:
-                log('检测到存档变化 (%d B) -> 快照' % len(data))
+                log(tr('Save changed (%d B) -> snapshot') % len(data))
                 p = snapshot(data, 'save', dry_run)
                 new_snapshot = p or new_snapshot
                 st['last_hash'] = h
@@ -437,42 +459,39 @@ def cycle(st, dry_run=False):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--once', action='store_true', help='只跑一轮后退出')
-    ap.add_argument('--dry-run', action='store_true', help='不写任何文件')
-    ap.add_argument('--check', action='store_true', help='打印环境探测结果后退出')
-    ap.add_argument('--config', metavar='FILE', help='指定 config.json 路径')
+    ap.add_argument('--once', action='store_true', help=tr('run one cycle then exit'))
+    ap.add_argument('--dry-run', action='store_true', help=tr('write nothing'))
+    ap.add_argument('--check', action='store_true', help=tr('print the environment probe results and exit'))
+    ap.add_argument('--config', metavar='FILE', help=tr('path to config.json'))
     ap.add_argument('--interval', type=int, default=POLL_SEC)
     a = ap.parse_args()
 
     if a.check:
         print(nsg_paths.describe(PATHS))
-        print('=== 目录与进程 ===')
-        print('存档目录存在      :', bool(SAVE_DIR) and os.path.isdir(SAVE_DIR))
-        print('存档文件存在      :', bool(SAVE_DIR) and os.path.isfile(
+        print(tr(' === Directories and processes ==='))
+        print(tr('save dir exists   :'), bool(SAVE_DIR) and os.path.isdir(SAVE_DIR))
+        print(tr('save file exists  :'), bool(SAVE_DIR) and os.path.isfile(
             os.path.join(SAVE_DIR, SAVE_NAME)) if SAVE_DIR else False)
-        print('游戏目录存在      :', bool(GAME_DIR) and os.path.isdir(GAME_DIR))
-        print('NSM 目录存在      :', bool(NSM_DIR) and os.path.isdir(NSM_DIR))
-        print('备份根目录        :', BACKUP_ROOT, '->',
-              '存在' if os.path.isdir(BACKUP_ROOT) else '待建')
-        print('游戏进程运行中    :', process_running())
+        print(tr('game dir exists   :'), bool(GAME_DIR) and os.path.isdir(GAME_DIR))
+        print(tr('NSM dir exists    :'), bool(NSM_DIR) and os.path.isdir(NSM_DIR))
+        print(tr('backup root       :'), BACKUP_ROOT, '->',
+              tr('exists') if os.path.isdir(BACKUP_ROOT) else tr('to be created'))
+        print(tr('game running      :'), process_running())
         if SAVE_DIR:
             p = os.path.join(SAVE_DIR, SAVE_NAME)
             if os.path.isfile(p):
                 s = os.stat(p)
-                print('当前存档          : %d B  %s' % (
+                print(tr('current save      : %d B  %s') % (
                     s.st_size,
                     datetime.fromtimestamp(s.st_mtime).strftime('%Y-%m-%d %H:%M:%S')))
         return
 
     if not SAVE_DIR:
-        print('!! 未能定位存档目录，无法继续。')
+        print(tr(' !! Could not locate the save directory, cannot continue.'))
         print(nsg_paths.describe(PATHS))
-        print('\n请编辑 config.json 显式填写 save_dir，例如：')
+        print(tr('\nEdit config.json and set save_dir explicitly, for example:'))
         print('  {')
-        print(r'    "save_dir": "C:\\Users\\<你>\\AppData\\Roaming\\Macromedia\\'
-              r'Flash Player\\#SharedObjects\\XXXXXXXX\\localhost\\'
-              r'Program Files (x86)\\Steam\\steamapps\\common\\'
-              r'NEO Scavenger\\NEOScavenger.exe"')
+        print(tr('    "save_dir": "C:\\\\Users\\\\<you>\\\\AppData\\\\Roaming\\\\Macromedia\\\\Flash Player\\\\#SharedObjects\\\\XXXXXXXX\\\\localhost\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\NEO Scavenger\\\\NEOScavenger.exe"'))
         print('  }')
         sys.exit(2)
 
@@ -483,11 +502,11 @@ def main():
             save_state(st)
         return
 
-    log('=== 监视器启动 (interval=%ds, cooldown=%ds, 保留: 2h内全留/48h内每小时/之后每天, g0=%s, 带起GUI=%s) ==='
+    log(tr(' === Watcher started (interval=%ds, cooldown=%ds, retention: all within 2h / hourly up to 48h / daily after, g0=%s, launchGUI=%s) ===')
         % (a.interval, MIN_SNAPSHOT_GAP_SEC, REFRESH_G0, LAUNCH_GUI_ON_GAME_START))
-    log('    存档目录: %s [%s]' % (SAVE_DIR, PATHS['source'].get('save_dir')))
-    log('    备份目录: %s [%s]' % (BACKUP_ROOT, PATHS['source'].get('backup_root')))
-    st = cycle(st, False)          # 启动即刻做一次
+    log(tr('     save dir  : %s [%s]') % (SAVE_DIR, PATHS['source'].get('save_dir')))
+    log(tr('     backup dir: %s [%s]') % (BACKUP_ROOT, PATHS['source'].get('backup_root')))
+    st = cycle(st, False)          # do one right away on startup
     save_state(st)
     while True:
         try:
@@ -495,10 +514,10 @@ def main():
             st = cycle(st, False)
             save_state(st)
         except KeyboardInterrupt:
-            log('收到中断，退出')
+            log(tr('Interrupted, exiting'))
             return
         except Exception as e:
-            log('!! 周期异常: %r' % e)
+            log(tr(' !! Cycle error: %r') % e)
             time.sleep(a.interval)
 
 

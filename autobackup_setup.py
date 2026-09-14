@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
-r"""NEO Scavenger 自动备份 —— 安装 / 卸载 / 状态 / 播种
+r"""NEO Scavenger auto-backup — install / uninstall / status / seed
 
-子命令：
-    install    生成计划任务 XML 并注册（登录时隐藏启动监视器），随后立即启动
-    uninstall  删除计划任务（不动任何备份文件）
-    status     查看任务状态、备份数量、最新快照
-    seed       把最新快照同步进 NEO Save Manager 的槽位（默认 g1 + g0）
-    run        手动跑一轮监视器
+Subcommands:
+    install    generate the scheduled-task XML and register it (hidden watcher at
+               logon), then start it immediately
+    uninstall  delete the scheduled task (touches no backup files)
+    status     show task state, backup count, newest snapshots
+    seed       sync the newest snapshot into NEO Save Manager slots (default g1 + g0)
+    run        run one watcher cycle manually
 
-设计说明：
-  · 监视器由 pythonw.exe 承载 → 无控制台窗口
-  · 任务 XML 用 UTF-16LE + BOM 写出（schtasks /XML 的要求）
-  · 任务名先用中文，若注册失败自动回退纯 ASCII，排除编码变量
+Design notes:
+  · The watcher is hosted by pythonw.exe -> no console window
+  · The task XML is written as UTF-16LE + BOM (a schtasks /XML requirement)
+  · The task name is Chinese first; if registration fails it falls back to plain
+    ASCII, which removes the encoding variable
 """
 
 import argparse
@@ -26,8 +28,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 WATCHER = os.path.join(HERE, 'neo_save_watcher.py')
 XML_PATH = os.path.join(HERE, 'autobackup_task.xml')
 
-# 路径不硬编码：与监视器共用同一套解析（环境变量 → config.json → 自动探测）
+# Paths are not hard-coded: this shares the watcher's resolution chain
+# (environment variables -> config.json -> auto-detection)
 import nsg_paths
+from nsg_i18n import tr
 
 PATHS = nsg_paths.resolve()
 GAME_DIR = PATHS['game_dir']
@@ -36,13 +40,14 @@ BACKUP_ROOT = PATHS['backup_root']
 
 
 def _sibling(name):
-    """与当前解释器同目录的另一个可执行文件（python.exe ↔ pythonw.exe）"""
+    """Another executable next to the current interpreter (python.exe <-> pythonw.exe)"""
     d = os.path.dirname(sys.executable or '')
     cand = os.path.join(d, name)
     return cand if os.path.isfile(cand) else None
 
 
-# 不再硬编码 Python 路径：跟随「正在运行本脚本的解释器」
+# The Python path is no longer hard-coded: it follows the interpreter running
+# this very script.
 PYTHON = sys.executable or ''
 PYTHONW = _sibling('pythonw.exe') or PYTHON
 
@@ -117,7 +122,7 @@ def build_xml(task_name):
 
 def write_xml(task_name):
     data = build_xml(task_name)
-    # schtasks /XML 要求 Unicode；UTF-16LE + BOM
+    # schtasks /XML requires Unicode; UTF-16LE + BOM
     with open(XML_PATH, 'wb') as f:
         f.write(b'\xff\xfe')
         f.write(data.encode('utf-16-le'))
@@ -139,48 +144,48 @@ def query(task_name):
 
 
 def cmd_install(a):
-    print('=== 前置校验 ===')
+    print(tr(' === Preflight checks ==='))
     if not account():
-        print('  !! 无法确定当前用户名（USERNAME / COMPUTERNAME 均为空），终止。')
+        print(tr('   !! Cannot determine the current user (USERNAME / COMPUTERNAME are empty), aborting.'))
         return 1
     hard = [
-        ('监视器脚本', os.path.isfile(WATCHER), WATCHER),
+        (tr('watcher script'), os.path.isfile(WATCHER), WATCHER),
         ('pythonw.exe', os.path.isfile(PYTHONW), PYTHONW),
-        ('存档目录', bool(PATHS['save_dir']) and os.path.isdir(PATHS['save_dir']),
+        (tr('Save dir'), bool(PATHS['save_dir']) and os.path.isdir(PATHS['save_dir']),
          PATHS['save_dir']),
     ]
     soft = [
-        ('游戏目录', bool(GAME_DIR) and os.path.isdir(GAME_DIR), GAME_DIR),
-        ('NSM 目录', bool(NSM_DIR) and os.path.isdir(NSM_DIR), NSM_DIR),
+        (tr('Game dir'), bool(GAME_DIR) and os.path.isdir(GAME_DIR), GAME_DIR),
+        (tr('NSM dir'), bool(NSM_DIR) and os.path.isdir(NSM_DIR), NSM_DIR),
     ]
     ok = True
     for label, cond, p in hard:
         print('  %-12s %-4s %s' % (label, 'OK' if cond else 'FAIL', p))
         ok = ok and cond
     for label, cond, p in soft:
-        print('  %-12s %-4s %s   (可选，缺失只影响 NSM 槽位同步)'
+        print(tr('   %-12s %-4s %s   (optional; only affects NSM slot sync)')
               % (label, 'OK' if cond else 'SKIP', p))
     if not ok:
-        print('\n必需条件不满足，终止。')
-        print('可先运行 `python neo_save_watcher.py --check` 查看路径解析明细。')
+        print(tr('\nRequired conditions not met, aborting.'))
+        print(tr('Run `python neo_save_watcher.py --check` first to see the path resolution details.'))
         return 1
 
-    print('\n=== 注册计划任务 ===')
+    print(tr('\n=== Registering scheduled task ==='))
     for name in (TASK_NAME_CN, TASK_NAME_EN):
         xml = write_xml(name)
         rc, out = schtasks(['/Create', '/TN', name, '/XML', xml, '/F'])
         if rc == 0:
-            print('  任务名: %s' % name)
+            print(tr('   task name: %s') % name)
             print('  XML  : %s' % xml)
-            print('\n=== 立即启动（无需等待重新登录） ===')
+            print(tr('\n=== Starting now (no need to log off and on) ==='))
             rc2, out2 = schtasks(['/Run', '/TN', name])
-            print('  /Run 返回码:', rc2)
-            print('\n=== 任务状态 ===')
+            print(tr('   /Run return code:'), rc2)
+            print(tr('\n=== Task status ==='))
             cmd_status(a)
             return 0
         else:
-            print('  用任务名 %r 注册失败，尝试下一个…' % name)
-    print('  全部任务名均注册失败')
+            print(tr('   Registering task name %r failed, trying the next one...') % name)
+    print(tr('   All task names failed to register'))
     return 1
 
 
@@ -188,33 +193,35 @@ def cmd_uninstall(a):
     for name in (TASK_NAME_CN, TASK_NAME_EN):
         rc, out = schtasks(['/Query', '/TN', name], quiet=True)
         if rc == 0:
-            print('=== 删除任务: %s ===' % name)
+            print(tr(' === Deleting task: %s ===') % name)
             schtasks(['/End', '/TN', name], quiet=True)
             schtasks(['/Delete', '/TN', name, '/F'])
-    print('\n备份文件未被删除，仍在: %s' % BACKUP_ROOT)
+    print(tr('\nBackup files were not deleted; they are still in: %s') % BACKUP_ROOT)
     return 0
 
 
 def cmd_status(a):
-    print('=== 计划任务 ===')
+    print(tr(' === Scheduled task ==='))
     found = False
     for name in (TASK_NAME_CN, TASK_NAME_EN):
         rc, out = query(name)
         if rc == 0:
             found = True
-            print('  任务: %s' % name)
+            print(tr('   task: %s') % name)
             for line in out.splitlines():
                 ls = line.strip()
                 if not ls:
                     continue
+                # NB: these match words are intentionally left untranslated -- they
+                # must match whatever locale schtasks actually emits.
                 if any(k in ls for k in ('状态', 'Status', '上次运行', 'Last Run',
                                          '上次结果', 'Last Result', '下次运行', 'Next Run',
                                          '要运行的任务', 'Task To Run', '作为用户', 'Run As User')):
                     print('    ', ls)
     if not found:
-        print('  未注册（用 install 注册）')
+        print(tr('   not registered (use install)'))
 
-    print('\n=== 监视器进程 ===')
+    print(tr('\n=== Watcher processes ==='))
     import ctypes
     found_py = False
     k32 = ctypes.windll.kernel32
@@ -231,6 +238,8 @@ def cmd_status(a):
         e.dwSize = ctypes.sizeof(PE32)
         okk = k32.Process32First(snap, ctypes.byref(e))
         while okk:
+            # Match on the exe name, never on wmic text output: wmic emits GBK and
+            # mis-decodes non-ASCII, which used to report "process absent" wrongly.
             nm = e.szExeFile.decode('mbcs', errors='replace')
             if nm.lower() in ('pythonw.exe', 'python.exe'):
                 found_py = True
@@ -238,24 +247,24 @@ def cmd_status(a):
             okk = k32.Process32Next(snap, ctypes.byref(e))
         k32.CloseHandle(snap)
     if not found_py:
-        print('    未发现 python/pythonw 进程（监视器可能未运行）')
+        print(tr('     No python/pythonw process found (the watcher may not be running)'))
 
-    print('\n=== 备份快照 ===')
+    print(tr('\n=== Snapshots ==='))
     if not os.path.isdir(BACKUP_ROOT):
-        print('  目录尚不存在:', BACKUP_ROOT)
+        print(tr('   directory does not exist yet:'), BACKUP_ROOT)
     else:
         names = sorted([n for n in os.listdir(BACKUP_ROOT)
                         if n.startswith('nsSGv1_') and n.endswith('.sol')], reverse=True)
         total = sum(os.path.getsize(os.path.join(BACKUP_ROOT, n)) for n in names)
-        print('  目录    : %s' % BACKUP_ROOT)
-        print('  快照份数: %d   合计 %.2f MB' % (len(names), total / 1048576.0))
+        print(tr('   dir         : %s') % BACKUP_ROOT)
+        print(tr('   snapshots   : %d   %.2f MB total') % (len(names), total / 1048576.0))
         for n in names[:5]:
             p = os.path.join(BACKUP_ROOT, n)
-            print('    最新  %9d B  %s' % (os.path.getsize(p), n))
+            print(tr('     newest %9d B  %s') % (os.path.getsize(p), n))
         if len(names) > 5:
-            print('    ...   共 %d 份' % len(names))
+            print(tr('     ...   %d total') % len(names))
 
-    print('\n=== NEO Save Manager 槽位 ===')
+    print(tr('\n=== NEO Save Manager slots ==='))
     if os.path.isdir(NSM_DIR):
         for n in sorted(os.listdir(NSM_DIR)):
             if n.startswith('nsSGv1_g'):
@@ -263,6 +272,7 @@ def cmd_status(a):
                 extra = ''
                 if n.endswith('.ini'):
                     try:
+                        # Slot labels are written as GBK; decode accordingly.
                         extra = '  -> ' + open(p, 'rb').read().decode('gbk').strip()
                     except Exception:
                         pass
@@ -274,30 +284,30 @@ def cmd_seed(a):
     names = sorted([n for n in os.listdir(BACKUP_ROOT)
                     if n.startswith('nsSGv1_') and n.endswith('.sol')], reverse=True)
     if not names:
-        print('auto\\ 中没有快照，先跑一轮监视器')
+        print(tr('No snapshots in auto\\, run the watcher once first'))
         return 1
     src = os.path.join(BACKUP_ROOT, names[0])
     with open(src, 'rb') as f:
         data = f.read()
 
     m = re.match(r'nsSGv1_(\d{8})-(\d{6})_', names[0])
-    label = '存档 %s-%s-%s %s:%s' % (
+    label = tr('Save %s-%s-%s %s:%s') % (
         m.group(1)[:4], m.group(1)[4:6], m.group(1)[6:8],
-        m.group(2)[:2], m.group(2)[2:4]) if m else '存档'
+        m.group(2)[:2], m.group(2)[2:4]) if m else tr('Save')
 
     targets = [int(x) for x in a.slots.split(',')] if a.slots else [1, 0]
-    print('源快照: %s (%d B)' % (names[0], len(data)))
-    print('标签  : %s' % label)
+    print(tr('source snapshot: %s (%d B)') % (names[0], len(data)))
+    print(tr('label : %s') % label)
     for slot in targets:
         dst = os.path.join(NSM_DIR, 'nsSGv1_g%d.sol' % slot)
         with open(dst, 'wb') as f:
             f.write(data)
-        print('  写入槽%d: %s (%d B)' % (slot, os.path.basename(dst), len(data)))
+        print(tr('   wrote slot %d: %s (%d B)') % (slot, os.path.basename(dst), len(data)))
         if slot != 0:
             lbl = os.path.join(NSM_DIR, 'nsSGv1_g%d.ini' % slot)
             with open(lbl, 'wb') as f:
                 f.write((label + '\r\n').encode('gbk'))
-            print('  写入标签: %s -> %s' % (os.path.basename(lbl), label))
+            print(tr('   wrote label: %s -> %s') % (os.path.basename(lbl), label))
     return 0
 
 
@@ -306,12 +316,12 @@ def cmd_run(a):
         if py and os.path.isfile(py):
             subprocess.run([py, WATCHER, '--once'])
             return 0
-    print('未找到 python')
+    print(tr('python not found'))
     return 1
 
 
 def cmd_restart(a):
-    """重启监视器：改动 neo_save_watcher.py 后必须重启才生效"""
+    """Restart the watcher: required after editing neo_save_watcher.py"""
     name = None
     for cand in (TASK_NAME_CN, TASK_NAME_EN):
         rc, _ = schtasks(['/Query', '/TN', cand], quiet=True)
@@ -319,12 +329,12 @@ def cmd_restart(a):
             name = cand
             break
     if not name:
-        print('未找到计划任务，请先 install')
+        print(tr('Scheduled task not found; run install first'))
         return 1
     schtasks(['/End', '/TN', name], quiet=True)
     time.sleep(1)
     rc, out = schtasks(['/Run', '/TN', name])
-    print('已重启任务: %s (返回码 %s)' % (name, rc))
+    print(tr('Task restarted: %s (return code %s)') % (name, rc))
     time.sleep(2)
     cmd_status(a)
     return 0
@@ -337,7 +347,7 @@ def main():
     sub.add_parser('uninstall')
     sub.add_parser('status')
     p_seed = sub.add_parser('seed')
-    p_seed.add_argument('--slots', default=None, help='逗号分隔，默认 1,0')
+    p_seed.add_argument('--slots', default=None, help=tr('comma separated, default 1,0'))
     sub.add_parser('run')
     sub.add_parser('restart')
     a = ap.parse_args()
